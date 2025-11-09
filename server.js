@@ -1,80 +1,95 @@
 import express from "express";
-import { exec, execSync } from "child_process";
+import cors from "cors";
+import { exec } from "child_process";
 import fs from "fs";
 import path from "path";
-import cors from "cors";
 
 const app = express();
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
+const API_KEY = process.env.API_KEY || "FullnessVoice2025"; // 🔒 clé de sécurité
 const audioDir = path.join(process.cwd(), "audio");
-// Resolve yt-dlp command (prefer local binary on Windows if present)
-const localYtDlp = process.platform === "win32" ? path.join(process.cwd(), "yt-dlp.exe") : null;
-const ytdlpCmd = localYtDlp && fs.existsSync(localYtDlp) ? `"${localYtDlp}"` : "yt-dlp";
 
-// Check ffmpeg availability (yt-dlp needs it for audio extraction)
-function hasFfmpeg() {
-  try {
-    execSync("ffmpeg -version", { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-app.use(express.json());
+// Middlewares
 app.use(cors());
+app.use(express.json());
 
-// Crée le dossier audio s’il n’existe pas
-if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir);
+// Dossier audio
+if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir, { recursive: true });
 
-// ✅ Endpoint pour convertir une vidéo YouTube en MP3
+// 🌐 Page de test
+app.get("/", (req, res) => {
+  res.send(`
+    <h2>🎶 Musik API – Fullness Voice</h2>
+    <p>Utilisation : POST /convert avec JSON { "videoId": "XXXXXXXXXXX", "key": "${API_KEY}" }</p>
+    <p>Exemple : <code>curl -X POST -H "Content-Type: application/json" -d '{"videoId":"OITn1QCmfas","key":"${API_KEY}"}' ${req.protocol}://${req.get("host")}/convert</code></p>
+  `);
+});
+
+// 🎧 Conversion principale
 app.post("/convert", (req, res) => {
-  const { videoId } = req.body;
+  const { videoId, key } = req.body;
+
   if (!videoId) return res.status(400).json({ error: "videoId requis" });
+  if (key !== API_KEY) return res.status(403).json({ error: "Clé API invalide" });
 
-  const outputFile = path.join(audioDir, `${videoId}.mp3`);
-  const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const safeId = videoId.replace(/[^A-Za-z0-9_-]/g, "");
+  const outputFile = path.join(audioDir, `${safeId}.mp3`);
+  const ytUrl = `https://www.youtube.com/watch?v=${safeId}`;
 
+  // Si déjà converti
   if (fs.existsSync(outputFile)) {
-    return res.json({ success: true, file: `/audio/${videoId}.mp3`, message: "Déjà converti" });
-  }
-
-  if (!hasFfmpeg()) {
-    return res.status(500).json({
-      error: "ffmpeg introuvable",
-      message: "Installez ffmpeg ou ajoutez-le au PATH pour permettre l'extraction audio en MP3.",
-      hint: "Windows: téléchargez https://www.gyan.dev/ffmpeg/builds/ et ajoutez /bin au PATH"
+    return res.json({
+      success: true,
+      message: "Déjà converti",
+      file: `/audio/${safeId}.mp3`
     });
   }
 
-  const cmd = `${ytdlpCmd} -x --audio-format mp3 --embed-thumbnail -o "${audioDir}/%(id)s.%(ext)s" "${ytUrl}"`;
-  console.log("▶️ Commande :", cmd);
+  const command = `yt-dlp -x --audio-format mp3 --no-playlist -o "${audioDir}/%(id)s.%(ext)s" "${ytUrl}"`;
 
-  exec(cmd, (err, stdout, stderr) => {
+  console.log("🎬 Conversion :", command);
+
+  exec(command, (err, stdout, stderr) => {
     if (err) {
-      console.error(stderr);
-      return res.status(500).json({ error: "Erreur conversion", details: stderr });
+      console.error("❌ Erreur :", stderr);
+      return res.status(500).json({
+        error: "Erreur de conversion",
+        exit_code: err.code,
+        cmd: command,
+        output: stderr
+      });
     }
 
     if (fs.existsSync(outputFile)) {
-      res.json({ success: true, file: `/audio/${videoId}.mp3` });
+      console.log(`✅ Conversion terminée : ${outputFile}`);
+      res.json({
+        success: true,
+        message: "Conversion réussie",
+        file: `/audio/${safeId}.mp3`
+      });
     } else {
-      res.status(500).json({ error: "Conversion échouée" });
+      console.warn("⚠️ Fichier non trouvé après conversion.");
+      res.status(500).json({ error: "Conversion échouée", output: stdout });
     }
   });
 });
 
-// Sert les fichiers MP3
+// 📦 Servir les fichiers MP3
 app.use("/audio", express.static(audioDir));
 
-// Test simple
-app.get("/", (req, res) => {
-  res.send(`<!doctype html><html lang="fr"><head><meta charset="utf-8"/><title>Musik API</title></head><body style="font-family:Arial;margin:2rem">\n<h3>🎧 API Musik active (port ${PORT})</h3>\n<p>POST <code>/convert</code> JSON: { "videoId": "OITn1QCmfas" }</p>\n<p>Fichier servi ensuite: <code>/audio/OITn1QCmfas.mp3</code></p>\n</body></html>`);
-});
+// 🚀 Lancer le serveur avec gestion EADDRINUSE
+function startServer(port) {
+  const server = app.listen(port, () => {
+    console.log(`✅ Musik API opérationnelle sur http://localhost:${port}`);
+  });
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`❌ Port ${port} déjà utilisé. Réessayez avec PORT différent (ex: 4100) : set PORT=4100 && npm start`);
+    } else {
+      console.error("❌ Erreur serveur:", err);
+    }
+    process.exit(1);
+  });
+}
 
-// Health endpoint (useful for scripts)
-app.get("/health", (req, res) => {
-  res.json({ ok: true, port: PORT, ffmpeg: hasFfmpeg(), ytDlp: ytdlpCmd });
-});
-
-app.listen(PORT, () => console.log(`✅ Serveur Musik lancé sur http://localhost:${PORT}`));
+startServer(PORT);
