@@ -43,3 +43,9 @@ Thumbs.db
 
 # Misc
 *.swp
+
+# Binaries
+yt-dlp.exe
+
+# Generated audio
+audio/*.mp3
